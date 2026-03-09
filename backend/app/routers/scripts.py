@@ -11,7 +11,8 @@ from app.database import get_session
 from app.models.script import Script
 from app.repositories.base import AbstractScriptRepository
 from app.repositories.script_repository import SQLModelScriptRepository
-from app.schemas.script import ScriptListItem, ScriptRead
+from app.schemas.script import ScriptListItem, ScriptRead, ValidationResult as ValidationResultSchema
+from app.services.validator import validate_script
 
 router = APIRouter(prefix="/scripts", tags=["scripts"])
 
@@ -85,6 +86,27 @@ def update_script(
 
     script.updated_at = datetime.now(timezone.utc)
     return repo.update(script)
+
+
+@router.post("/{script_id}/validate", response_model=ValidationResultSchema)
+def validate_script_endpoint(
+    script_id: str,
+    repo: AbstractScriptRepository = Depends(get_repo),
+):
+    script = repo.get_by_id(script_id)
+    if script is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Script not found")
+
+    script_path = Path(settings.scripts_path) / script_id / "script.py"
+    if not script_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Script file not found on disk")
+
+    result = validate_script(script_path)
+    return ValidationResultSchema(
+        valid=result.valid,
+        syntax_ok=result.syntax_ok,
+        syntax_error=result.syntax_error,
+    )
 
 
 @router.delete("/{script_id}", status_code=status.HTTP_204_NO_CONTENT)

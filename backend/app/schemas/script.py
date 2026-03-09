@@ -17,3 +17,9 @@ class ScriptListItem(BaseModel):
     has_requirements: bool
     created_at: datetime
     model_config = {"from_attributes": True}
+
+
+class ValidationResult(BaseModel):
+    valid: bool
+    syntax_ok: bool
+    syntax_error: str | None = None
