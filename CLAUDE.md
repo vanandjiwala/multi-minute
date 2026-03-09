@@ -35,7 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 5. Demand Elegance (Balanced)
 
 - For non-trivial changes: pause and ask **"Is there a more elegant way?"**
-- If a fix feels hacky:  
+- If a fix feels hacky:
   **"Knowing everything I know now, implement the elegant solution."**
 - Skip this for **simple, obvious fixes** — don't over-engineer.
 - **Challenge your own work** before presenting it.
@@ -51,36 +51,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Task Management
 
-1. **Plan First**  
+1. **Plan First**
    Write plan to `tasks/todo.md` with checkable items.
 
-2. **Verify Plan**  
+2. **Verify Plan**
    Check in before starting implementation.
 
-3. **Track Progress**  
+3. **Track Progress**
    Mark items complete as you go.
 
-4. **Explain Changes**  
+4. **Explain Changes**
    Provide a high-level summary at each step.
 
-5. **Document Results**  
+5. **Document Results**
    Add a review section to `tasks/todo.md`.
 
-6. **Capture Lessons**  
+6. **Capture Lessons**
    Update `tasks/lessons.md` after corrections.
 
 ---
 
 ## Core Principles
 
-- **Simplicity First**  
-  Make every change as simple as possible. Impact minimal code.
+- **Simplicity First** — Make every change as simple as possible. Impact minimal code.
+- **No Laziness** — Find root causes. No temporary fixes. Maintain senior developer standards.
+- **Minimal Impact** — Changes should only touch what's necessary. Avoid introducing bugs.
 
-- **No Laziness**  
-  Find root causes. No temporary fixes. Maintain senior developer standards.
-
-- **Minimal Impact**  
-  Changes should only touch what's necessary. Avoid introducing bugs.
+---
 
 ## Project Overview
 
@@ -102,7 +99,9 @@ cd backend && uv run pytest
 cd backend && uv run pytest tests/path/to/test_file.py::test_function_name -v
 ```
 
-API docs available at `http://localhost:8000/docs` once the server is running.
+API docs at `http://localhost:8000/docs`. Use `uv`, not `pip`, for all package operations.
+
+---
 
 ## Architecture
 
@@ -112,43 +111,47 @@ API docs available at `http://localhost:8000/docs` once the server is running.
 - **APScheduler 3.x** (`AsyncIOScheduler`) — cron scheduling
 - **SQLModel + SQLite** — ORM and persistence (`storage/scheduler.db`)
 - **Python `venv` + `subprocess`** — isolated dependency management and script execution
+- **pydantic-settings** — configuration via env vars
 
-### Core Entities
+### Three Core Entities
 
-- **Script** — uploaded `.py` file with optional `requirements.txt`
-- **Job** — maps a cron schedule to a Script with optional `env_vars`, `cli_args`, `max_history`
-- **JobRun** — a single execution record: stdout, stderr, exit_code, timing
+| Entity | Status | Description |
+|---|---|---|
+| `Script` | Implemented | Uploaded `.py` + optional `requirements.txt` |
+| `Job` | Planned | Cron schedule mapped to a Script; `env_vars`, `cli_args`, `max_history` |
+| `JobRun` | Planned | Single execution record: stdout, stderr, exit_code, timing |
 
-### Current Layer Structure (`backend/app/`)
+### Layer Structure (`backend/app/`)
 
-- **`models/`** — SQLModel table classes (DB schema). `Script` is the only model so far.
-- **`schemas/`** — Pydantic response shapes (`ScriptRead`, `ScriptListItem`). Separate from models to control what's exposed.
-- **`repositories/`** — `AbstractScriptRepository` ABC + `SQLModelScriptRepository` implementation. Routers depend on the ABC, never the concrete class.
-- **`routers/`** — FastAPI routers. Each router injects a repo via `Depends(get_repo)`.
-- **`config.py`** — `Settings` (pydantic-settings). Storage paths and DB URL configurable via env vars; `effective_database_url` resolves SQLite default vs override.
-- **`database.py`** — engine, `get_session` generator, `create_db()` (called in lifespan).
+- **`models/`** — SQLModel table classes (DB schema). Only `Script` exists.
+- **`schemas/`** — Pydantic response shapes, separate from models to control API exposure.
+- **`repositories/`** — `AbstractScriptRepository` ABC + `SQLModelScriptRepository`. Routers always depend on the ABC, enabling mock repos in tests.
+- **`routers/`** — FastAPI routers. Each injects a repo via `Depends(get_repo)`. Registered in `main.py`.
+- **`services/`** — Business logic. `validator.py` (syntax check via `ast.parse`) exists; `executor.py`, `scheduler.py`, `venv_manager.py` are planned.
+- **`config.py`** — `Settings` with `effective_database_url`: resolves SQLite default path or `DATABASE_URL` env override.
+- **`database.py`** — engine, `get_session` generator, `create_db()` called in lifespan. Must `mkdir(parents=True, exist_ok=True)` on the db path parent or startup fails.
+- **`main.py`** — FastAPI app with `lifespan` context. APScheduler start/stop hooks go here.
 
-### Planned Services (`backend/app/services/`) — not yet implemented
+### Storage Layout (all `.gitignored`, all paths configurable via env vars)
 
-- **`executor.py`** — runs scripts via `subprocess.Popen` using the script's dedicated venv Python interpreter; captures stdout/stderr/exit code
-- **`scheduler.py`** — APScheduler wrapper; loads all enabled jobs on startup, dynamically adds/removes entries on job CRUD
-- **`venv_manager.py`** — creates virtualenvs under `storage/venvs/{script_id}/`, runs `pip install -r requirements.txt`
-- **`validator.py`** — two-step validation: `ast.parse` syntax check, then subprocess dry run with 5s timeout
+```
+storage/
+  scripts/{script_id}/script.py        # uploaded script
+  scripts/{script_id}/requirements.txt # optional deps
+  venvs/{script_id}/                   # per-script virtualenv (planned)
+  scheduler.db                          # SQLite database
+```
 
-### Storage Layout
+### Planned Services
 
-All paths are configurable via environment variables; defaults:
+- **`executor.py`** — `subprocess.Popen` using `{venv}/bin/python {script_path} [cli_args]`; merges `os.environ` with job `env_vars`; captures stdout/stderr/exit code. No retry on failure.
+- **`scheduler.py`** — APScheduler wrapper; loads all enabled jobs from DB on startup; updates live scheduler on Job CRUD.
+- **`venv_manager.py`** — creates virtualenvs under `storage/venvs/{script_id}/`, runs `pip install -r requirements.txt` into the venv.
 
-- `storage/scripts/` — uploaded script files
-- `storage/venvs/{script_id}/` — per-script virtualenvs
-- `storage/scheduler.db` — SQLite database
+### Adding a New Resource (follow the Script pattern)
 
-The `storage/` directory is `.gitignored`.
-
-### Scheduler Lifecycle
-
-The APScheduler `AsyncIOScheduler` is started/stopped in FastAPI's `lifespan` context (in `app/main.py`). On startup, all enabled jobs are loaded from the DB and registered. Job create/update/delete operations must also update the live scheduler.
-
-### Execution Model
-
-Each script runs as a subprocess using the script's venv interpreter: `{venv_path}/bin/python {script_path} [cli_args]`. The subprocess inherits `os.environ` merged with job-level `env_vars`. No retry on failure for POC.
+1. `models/{resource}.py` — SQLModel table
+2. `schemas/{resource}.py` — Pydantic request/response shapes
+3. `repositories/` — ABC + SQLModel implementation
+4. `routers/{resource}.py` — FastAPI router with `Depends(get_repo)`
+5. Register router in `main.py`
