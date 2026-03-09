@@ -90,16 +90,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Install dependencies
-cd backend && pip install -r requirements.txt
+cd backend && uv sync
 
 # Run dev server
-cd backend && uvicorn app.main:app --reload
+cd backend && uv run uvicorn app.main:app --reload
 
 # Run tests
-cd backend && pytest
+cd backend && uv run pytest
 
 # Run a single test
-cd backend && pytest tests/path/to/test_file.py::test_function_name -v
+cd backend && uv run pytest tests/path/to/test_file.py::test_function_name -v
 ```
 
 API docs available at `http://localhost:8000/docs` once the server is running.
@@ -119,7 +119,16 @@ API docs available at `http://localhost:8000/docs` once the server is running.
 - **Job** — maps a cron schedule to a Script with optional `env_vars`, `cli_args`, `max_history`
 - **JobRun** — a single execution record: stdout, stderr, exit_code, timing
 
-### Key Services (`backend/app/services/`)
+### Current Layer Structure (`backend/app/`)
+
+- **`models/`** — SQLModel table classes (DB schema). `Script` is the only model so far.
+- **`schemas/`** — Pydantic response shapes (`ScriptRead`, `ScriptListItem`). Separate from models to control what's exposed.
+- **`repositories/`** — `AbstractScriptRepository` ABC + `SQLModelScriptRepository` implementation. Routers depend on the ABC, never the concrete class.
+- **`routers/`** — FastAPI routers. Each router injects a repo via `Depends(get_repo)`.
+- **`config.py`** — `Settings` (pydantic-settings). Storage paths and DB URL configurable via env vars; `effective_database_url` resolves SQLite default vs override.
+- **`database.py`** — engine, `get_session` generator, `create_db()` (called in lifespan).
+
+### Planned Services (`backend/app/services/`) — not yet implemented
 
 - **`executor.py`** — runs scripts via `subprocess.Popen` using the script's dedicated venv Python interpreter; captures stdout/stderr/exit code
 - **`scheduler.py`** — APScheduler wrapper; loads all enabled jobs on startup, dynamically adds/removes entries on job CRUD
