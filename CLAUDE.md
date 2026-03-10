@@ -92,11 +92,21 @@ cd backend && uv sync
 # Run dev server
 cd backend && uv run uvicorn app.main:app --reload
 
-# Run tests
+# Run all tests
 cd backend && uv run pytest
 
+# Run tests in a single file
+cd backend && uv run pytest tests/api/test_scripts.py -v
+
 # Run a single test
-cd backend && uv run pytest tests/path/to/test_file.py::test_function_name -v
+cd backend && uv run pytest tests/api/test_jobs.py::test_create_job_enabled -v
+
+# Run only unit tests (no server required)
+cd backend && uv run pytest tests/unit/ -v
+
+# Add a dependency
+cd backend && uv add <package>
+cd backend && uv add --dev <package>   # dev-only
 ```
 
 API docs at `http://localhost:8000/docs`. Use `uv`, not `pip`, for all package operations.
@@ -118,19 +128,27 @@ API docs at `http://localhost:8000/docs`. Use `uv`, not `pip`, for all package o
 | Entity | Status | Description |
 |---|---|---|
 | `Script` | Implemented | Uploaded `.py` + optional `requirements.txt` |
-| `Job` | Planned | Cron schedule mapped to a Script; `env_vars`, `cli_args`, `max_history` |
+| `Job` | Implemented | Cron schedule mapped to a Script; `env_vars`, `cli_args`, `max_history`, `enabled` |
 | `JobRun` | Planned | Single execution record: stdout, stderr, exit_code, timing |
 
 ### Layer Structure (`backend/app/`)
 
-- **`models/`** — SQLModel table classes (DB schema). Only `Script` exists.
-- **`schemas/`** — Pydantic response shapes, separate from models to control API exposure.
-- **`repositories/`** — `AbstractScriptRepository` ABC + `SQLModelScriptRepository`. Routers always depend on the ABC, enabling mock repos in tests.
-- **`routers/`** — FastAPI routers. Each injects a repo via `Depends(get_repo)`. Registered in `main.py`.
-- **`services/`** — Business logic. `validator.py` (syntax check via `ast.parse`) exists; `executor.py`, `scheduler.py`, `venv_manager.py` are planned.
-- **`config.py`** — `Settings` with `effective_database_url`: resolves SQLite default path or `DATABASE_URL` env override.
+- **`models/`** — SQLModel table classes. `Script` and `Job` exist; `Job` uses `sa_column=Column(JSON)` for dict/list fields.
+- **`schemas/`** — Pydantic request/response shapes, separate from models to control API exposure.
+- **`repositories/`** — Each resource has an ABC (`base.py` / `job_base.py`) + SQLModel impl. Routers always `Depends` on the ABC, enabling mock repos in tests.
+- **`routers/`** — FastAPI routers registered in `main.py`. The jobs router injects both a job repo and a script repo (to validate `script_id` on create).
+- **`services/`** — `validator.py` (syntax check via `ast.parse`); `scheduler.py` (APScheduler singleton); `executor.py` and `venv_manager.py` are planned.
+- **`config.py`** — `Settings` (pydantic-settings). All storage paths are env-var overridable: `STORAGE_PATH`, `DB_PATH`, `SCRIPTS_PATH`, `VENVS_PATH`, `DATABASE_URL`.
 - **`database.py`** — engine, `get_session` generator, `create_db()` called in lifespan. Must `mkdir(parents=True, exist_ok=True)` on the db path parent or startup fails.
-- **`main.py`** — FastAPI app with `lifespan` context. APScheduler start/stop hooks go here.
+- **`main.py`** — FastAPI app with `lifespan`. On startup: creates DB tables, re-hydrates all enabled Jobs into the scheduler, then starts the scheduler. On shutdown: `scheduler.shutdown()`.
+
+### APScheduler Singleton (`services/scheduler.py`)
+
+`scheduler = AsyncIOScheduler()` is a **module-level singleton**. `lifespan` in `main.py` starts it once. The jobs router imports the same object and calls `schedule_job()` / `unschedule_job()` — changes are immediate (no restart needed). Job `id` (UUID) is used as the APScheduler job ID.
+
+On restart, `lifespan` re-queries enabled jobs from the DB and re-registers them, so no schedules are lost.
+
+`_run_job_stub` is the current callable — replace with `executor.execute_job` when `executor.py` is built.
 
 ### Storage Layout (all `.gitignored`, all paths configurable via env vars)
 
@@ -145,7 +163,6 @@ storage/
 ### Planned Services
 
 - **`executor.py`** — `subprocess.Popen` using `{venv}/bin/python {script_path} [cli_args]`; merges `os.environ` with job `env_vars`; captures stdout/stderr/exit code. No retry on failure.
-- **`scheduler.py`** — APScheduler wrapper; loads all enabled jobs from DB on startup; updates live scheduler on Job CRUD.
 - **`venv_manager.py`** — creates virtualenvs under `storage/venvs/{script_id}/`, runs `pip install -r requirements.txt` into the venv.
 
 ### Adding a New Resource (follow the Script pattern)
@@ -155,3 +172,38 @@ storage/
 3. `repositories/` — ABC + SQLModel implementation
 4. `routers/{resource}.py` — FastAPI router with `Depends(get_repo)`
 5. Register router in `main.py`
+
+---
+
+## Testing
+
+Tests live in `backend/tests/`. Dev dependencies (`pytest`, `httpx`, `pytest-mock`) are already in `pyproject.toml`.
+
+### Layout
+```
+tests/
+  conftest.py          # shared fixtures
+  unit/                # pure logic, no HTTP
+  api/                 # FastAPI TestClient tests
+```
+
+### Key Fixtures (`conftest.py`)
+
+- **`test_engine`** — in-memory SQLite with `StaticPool`; tables created/dropped per test.
+- **`session`** — `Session(test_engine)`; used by repository unit tests.
+- **`client`** — `TestClient(app)` with all patches applied (see below). Use for all API tests.
+- **`mock_schedule_job` / `mock_unschedule_job`** — `MagicMock` patching `app.routers.jobs.schedule_job/unschedule_job`; assert call counts in job tests.
+- **`make_script`** — helper that POSTs a script via `client` and returns parsed JSON; use in job tests to satisfy the `script_id` FK.
+
+### Engine Patching Gotcha
+
+`main.py` does `from app.database import engine`, binding the name at import time. Patching `app.database.engine` alone is not enough. The `client` fixture patches **both**:
+```python
+monkeypatch.setattr(db_module, "engine", test_engine)
+monkeypatch.setattr(main_module, "engine", test_engine)
+```
+`get_session` is also overridden via `app.dependency_overrides[get_session]`.
+
+### Scheduler in Tests
+
+`AsyncIOScheduler.start()` requires a running event loop — it cannot be started in plain sync pytest. The `client` fixture no-ops `scheduler.start/shutdown`. Scheduler unit tests (`test_scheduler.py`) use `BackgroundScheduler` instead, which shares the same `add_job/get_job/remove_job` API.
